@@ -123,5 +123,21 @@ class ManagedObjectsTest(BleTestCase):
         self.assertEqual(self.statuses[-1][0], "waiting")
 
 
+class BluetoothDownTest(BleTestCase):
+    def test_starts_without_bluetoothd_and_recovers(self):
+        self.bluez.down = True
+        source = self.make_source()
+        source.start()
+        status, _device, reason = self.statuses[-1]
+        self.assertEqual(status, "disconnected")
+        self.assertTrue(reason.startswith("bluetooth unavailable"), reason)
+
+        self.bluez.down = False
+        source.housekeeping()
+        self.assertEqual(self.bluez.count("GetManagedObjects"), 1)
+        self.assertEqual(self.bluez.count("StartDiscovery"), 1)
+        source.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

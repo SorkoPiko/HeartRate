@@ -42,7 +42,7 @@ class Source:
         self.on_reading = on_reading
         self.on_status = on_status
         self.bus = dbus.SystemBus()
-        self.manager = dbus.Interface(self.bus.get_object(BLUEZ, "/"), OBJECT_MANAGER)
+        self.manager = None  # created on first use, so a missing bluetoothd isn't fatal
         self.device_path = None
         self.char_path = None
         self.name = ""
@@ -87,7 +87,13 @@ class Source:
         self.connecting = False
 
     def objects(self):
-        return self.manager.GetManagedObjects()
+        try:
+            if self.manager is None:
+                self.manager = dbus.Interface(self.bus.get_object(BLUEZ, "/"), OBJECT_MANAGER)
+            return self.manager.GetManagedObjects()
+        except dbus.DBusException:
+            self.manager = None  # rebuild the proxy once bluetoothd is back
+            raise
 
     def adapter(self, objects):
         for path, ifaces in objects.items():
