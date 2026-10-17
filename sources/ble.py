@@ -9,6 +9,7 @@ Config (`[ble]`):
   name_prefix   only use devices whose name starts with this (optional)
 """
 import time
+import traceback
 
 import dbus
 import dbus.mainloop.glib
@@ -117,6 +118,14 @@ class Source:
 
     def tick(self):
         """Periodic housekeeping: (re)connect and expire stale readings."""
+        # Any exception would make GLib drop this timer and stop reconnecting for good
+        try:
+            self.housekeeping()
+        except Exception:
+            traceback.print_exc()
+        return True
+
+    def housekeeping(self):
         # Covers both a stalled stream and a subscription that never delivered
         if self.char_path is not None and time.monotonic() - self.last_seen > STALE_AFTER:
             self.offline("no reading for a while")
@@ -126,7 +135,6 @@ class Source:
             except dbus.DBusException as err:
                 # bluetoothd is down or restarting; keep ticking until it's back
                 self.offline(f"bluetooth unavailable: {err.get_dbus_message()}")
-        return True
 
     def try_connect(self):
         path, dev = self.find_device()

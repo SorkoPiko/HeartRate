@@ -224,5 +224,27 @@ class WatchdogTest(DaemonTestCase):
         self.assertEqual(self.source.calls, [])
 
 
+class TickResilienceTest(DaemonTestCase):
+    def test_tick_survives_errors_and_keeps_heartbeating(self):
+        self.go_live()
+        self.source.on_reading(70)
+        self.env.clock.advance(8)
+        with mock.patch.object(self.daemon.store, "write", side_effect=sqlite3.OperationalError("locked")), \
+                mock.patch("sys.stderr"):
+            self.assertTrue(self.daemon.tick())
+        self.daemon.write_state = mock.Mock(wraps=self.daemon.write_state)
+        self.env.clock.advance(5)
+        self.assertTrue(self.daemon.tick())
+        self.daemon.write_state.assert_called()
+
+    def test_tick_survives_source_restart_errors(self):
+        self.go_live()
+        self.source.start = mock.Mock(side_effect=RuntimeError("boom"))
+        self.env.clock.advance(11)
+        with mock.patch("sys.stderr"):
+            self.assertTrue(self.daemon.tick())
+        self.assertEqual(self.state()["status"], "disconnected")
+
+
 if __name__ == "__main__":
     unittest.main()

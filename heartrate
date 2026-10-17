@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import time
 import tomllib
+import traceback
 from pathlib import Path
 
 BUCKET = 10  # seconds per database row, clock-aligned
@@ -156,6 +157,15 @@ class Daemon:
         self.last_write = time.monotonic()
 
     def tick(self):
+        # An exception would make GLib drop this timer, silently ending flushes,
+        # heartbeats and the watchdog while the process lives on
+        try:
+            self.housekeeping()
+        except Exception:
+            traceback.print_exc()
+        return True
+
+    def housekeeping(self):
         if self.bucket and time.time() >= self.bucket.ts + BUCKET:
             self.flush()
         if self.status == "live" and time.monotonic() - self.last_reading > STALE_AFTER:
@@ -164,7 +174,6 @@ class Daemon:
             self.source.start()
         if time.monotonic() - self.last_write >= HEARTBEAT:
             self.write_state()
-        return True
 
     def shutdown(self, loop):
         self.flush()
