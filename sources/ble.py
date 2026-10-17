@@ -102,13 +102,18 @@ class Source:
         return None
 
     def find_device(self, objects):
+        matches = []
         for path, ifaces in objects.items():
             dev = ifaces.get(DEVICE)
             if not dev or HR_SERVICE not in [str(u).lower() for u in dev.get("UUIDs", [])]:
                 continue
             if str(dev.get("Name", "")).startswith(self.name_prefix):
-                return path, dev
-        return None, None
+                matches.append((path, dev))
+        if not matches:
+            return None, None
+        # Prefer a connected device, then one seen recently (RSSI is only set while advertising),
+        # so a cached strap that's switched off doesn't shadow one that's broadcasting
+        return max(matches, key=lambda m: (bool(m[1].get("Connected")), "RSSI" in m[1]))
 
     def find_char(self, objects):
         for path, ifaces in objects.items():

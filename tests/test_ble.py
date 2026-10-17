@@ -139,5 +139,28 @@ class BluetoothDownTest(BleTestCase):
         source.stop()
 
 
+class FindDeviceTest(BleTestCase):
+    def find(self, objects, config=None):
+        return self.make_source(config).find_device(objects)[0]
+
+    def test_needs_heart_rate_service(self):
+        self.assertIsNone(self.find({OTHER: device("Speaker", hr=False)}))
+
+    def test_name_prefix_filters(self):
+        objects = {STRAP: device("Polar H10", rssi=-60), WATCH: device("COROS PACE 3")}
+        self.assertEqual(self.find(objects, {"name_prefix": "COROS"}), WATCH)
+        self.assertIsNone(self.find({STRAP: device("Polar H10")}, {"name_prefix": "COROS"}))
+
+    def test_prefers_connected(self):
+        objects = {STRAP: device("Polar H10", rssi=-40), WATCH: device("COROS PACE 3", connected=True)}
+        self.assertEqual(self.find(objects), WATCH)
+
+    def test_prefers_recently_seen_over_stale(self):
+        objects = {STRAP: device("Polar H10"), WATCH: device("COROS PACE 3", rssi=-70)}
+        self.assertEqual(self.find(objects), WATCH)
+        objects = {WATCH: device("COROS PACE 3", rssi=-70), STRAP: device("Polar H10")}
+        self.assertEqual(self.find(objects), WATCH)
+
+
 if __name__ == "__main__":
     unittest.main()
