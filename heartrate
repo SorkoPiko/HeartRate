@@ -143,12 +143,16 @@ class Daemon:
             self.bucket = None
 
     def write_state(self):
+        status, reason = self.status, self.reason
+        if status == "live" and self.bpm is None:
+            # Live with nothing to show yet; the watchdog still tracks it as live
+            status, reason = "waiting", "waiting for first reading"
         state = {
-            "status": self.status,
-            "bpm": self.bpm if self.status == "live" else None,
+            "status": status,
+            "bpm": self.bpm if status == "live" else None,
             "device": self.device,
             "source": self.source_name,
-            "reason": self.reason,
+            "reason": reason,
             "updated": time.time(),
         }
         tmp = self.state_file.with_suffix(".tmp")
@@ -202,6 +206,9 @@ def waybar_line(state):
     if state is None or time.time() - state.get("updated", 0) > FOLLOW_STALE:
         return {"text": caption("–"), "class": "disconnected", "tooltip": "heartrate daemon not running"}
     status, device = state.get("status"), state.get("device") or ""
+    if status == "live" and state.get("bpm") is None:
+        status = "waiting"
+        state = {**state, "reason": state.get("reason") or "waiting for first reading"}
     if status == "live":
         return {"text": caption(state["bpm"]), "class": "live", "tooltip": f"{device}\n{state['bpm']} bpm"}
     tooltip = "\n".join(part for part in (device, state.get("reason")) if part)

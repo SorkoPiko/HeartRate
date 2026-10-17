@@ -79,6 +79,14 @@ class WaybarTest(unittest.TestCase):
         self.write_state()
         self.assertEqual(len(self.follow(polls=5)), 1)
 
+    def test_live_with_null_bpm_renders_waiting(self):
+        self.write_state(bpm=None)
+        [line] = self.follow()
+        self.assertEqual(line["class"], "waiting")
+        self.assertEqual(line["text"], caption("…"))
+        self.assertNotIn("None", line["tooltip"])
+        self.assertEqual(line["tooltip"], "COROS PACE 3 8B7D1F\nwaiting for first reading")
+
 
 if __name__ == "__main__":
     unittest.main()

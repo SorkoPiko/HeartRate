@@ -246,5 +246,23 @@ class TickResilienceTest(DaemonTestCase):
         self.assertEqual(self.state()["status"], "disconnected")
 
 
+class LiveWithoutReadingTest(DaemonTestCase):
+    def test_live_status_before_first_reading_publishes_waiting(self):
+        self.go_live("Strap 1")
+        state = self.state()
+        self.assertEqual(state["status"], "waiting")
+        self.assertIsNone(state["bpm"])
+        self.assertEqual(state["reason"], "waiting for first reading")
+        self.source.on_reading(72)
+        self.assertEqual((self.state()["status"], self.state()["bpm"]), ("live", 72))
+
+    def test_live_again_after_disconnect_waits_for_new_reading(self):
+        self.go_live()
+        self.source.on_reading(72)
+        self.source.on_status("disconnected", "Strap 1", "gone")
+        self.go_live()
+        self.assertEqual(self.state()["status"], "waiting")
+
+
 if __name__ == "__main__":
     unittest.main()
