@@ -47,6 +47,7 @@ class Source:
         self.char_path = None
         self.name = ""
         self.live = False
+        self.waiting = False
         self.last_seen = 0
         self.connecting = False
         self.scanning = False
@@ -126,7 +127,7 @@ class Source:
 
     def offline(self, why):
         self.char_path = None
-        self.live = False
+        self.live = self.waiting = False
         self.on_status("disconnected", self.name, why)
 
     def tick(self):
@@ -232,6 +233,7 @@ class Source:
                 self.offline(f"subscribe failed: {err.get_dbus_message()}")
                 return False
         self.last_seen = time.monotonic()
+        self.waiting = True
         self.on_status("waiting", self.name, "waiting for first reading")
         return False
 
@@ -244,9 +246,16 @@ class Source:
     def on_props(self, iface, changed, _invalidated, path=None):
         if iface == CHAR and path == self.char_path and "Value" in changed:
             self.last_seen = time.monotonic()
+            bpm = parse(changed["Value"])
+            if bpm == 0:
+                # Sent while the sensor has no reading yet (e.g. just after Broadcast HR turns on)
+                if self.live or not self.waiting:
+                    self.live, self.waiting = False, True
+                    self.on_status("waiting", self.name, "waiting for first reading")
+                return
             if not self.live:
-                self.live = True
+                self.live, self.waiting = True, False
                 self.on_status("live", self.name, "")
-            self.on_reading(parse(changed["Value"]))
+            self.on_reading(bpm)
         elif iface == DEVICE and path == self.device_path and changed.get("Connected") is False:
             self.offline("device not connected")

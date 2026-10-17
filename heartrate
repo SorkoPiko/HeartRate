@@ -118,6 +118,9 @@ class Daemon:
         self.last_write = 0
 
     def on_reading(self, bpm):
+        # 0 means the sensor has no reading; never record or publish it, whatever the source
+        if not bpm or bpm <= 0:
+            return
         now = time.time()
         self.last_reading = time.monotonic()
         if self.status != "live":
