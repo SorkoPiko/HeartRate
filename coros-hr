@@ -53,6 +53,10 @@ class Connector:
         self.bus.add_signal_receiver(
             self.on_props, dbus_interface=PROPS, signal_name="PropertiesChanged", path_keyword="path"
         )
+        # BlueZ drops unpaired devices soon after they disconnect, without a Connected change
+        self.bus.add_signal_receiver(
+            self.on_removed, dbus_interface="org.freedesktop.DBus.ObjectManager", signal_name="InterfacesRemoved"
+        )
         self.offline()
 
     def objects(self):
@@ -85,7 +89,8 @@ class Connector:
 
     def tick(self):
         """Periodic housekeeping: (re)connect and expire stale readings."""
-        if self.last_bpm is not None and time.monotonic() - self.last_seen > STALE_AFTER:
+        # Covers both a stalled stream and a subscription that never delivered
+        if self.char_path is not None and time.monotonic() - self.last_seen > STALE_AFTER:
             self.offline("no reading for a while")
         if self.char_path is None and not self.connecting:
             self.try_connect()
@@ -149,8 +154,15 @@ class Connector:
             if "InProgress" not in err.get_dbus_name():
                 self.offline(f"subscribe failed: {err.get_dbus_message()}")
                 return False
+        self.last_seen = time.monotonic()
         emit(caption("…"), "waiting", f"{self.name}\nwaiting for first reading")
         return False
+
+    def on_removed(self, path, _ifaces):
+        if self.device_path and str(path).startswith(self.device_path):
+            self.device_path = None
+            if self.char_path is not None:
+                self.offline()
 
     def on_props(self, iface, changed, _invalidated, path=None):
         if iface == CHAR and path == self.char_path and "Value" in changed:
