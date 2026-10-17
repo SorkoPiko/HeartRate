@@ -1,0 +1,10 @@
+[Unit]
+Description=Heart rate history daemon
+
+[Service]
+ExecStart=%h/code/HeartRate/heartrate daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

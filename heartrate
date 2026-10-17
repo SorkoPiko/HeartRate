@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Record heart rate history from a pluggable source.
+
+  heartrate daemon          own the source, write the database and the live state file
+  heartrate waybar --follow print waybar JSON whenever the state file changes
+
+The daemon is the only process that talks to the source. Everything else
+(waybar, the eww tile) reads the database or the state file it writes.
+"""
+import importlib
+import json
+import os
+import signal
+import sqlite3
+import sys
+import time
+import tomllib
+import traceback
+from pathlib import Path
+
+BUCKET = 10  # seconds per database row, clock-aligned
+HEARTBEAT = 5  # rewrite the state file at least this often
+STALE_AFTER = 10  # watchdog: restart a source that is live but silent this long
+FOLLOW_STALE = 15  # followers treat an older state file as a dead daemon
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS buckets (
+  ts      INTEGER PRIMARY KEY,
+  date    TEXT    NOT NULL,
+  min     INTEGER NOT NULL,
+  avg     REAL    NOT NULL,
+  max     INTEGER NOT NULL,
+  samples INTEGER NOT NULL,
+  source  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_buckets_date ON buckets(date);
+"""
+
+USAGE = """usage: heartrate <command>
+
+commands:
+  daemon            connect to the configured source and record heart rate
+  waybar --follow   print waybar JSON on every state change
+"""
+
+
+def config_path():
+    return Path(os.environ.get("HEARTRATE_CONFIG", Path.home() / ".config/heartrate/config.toml"))
+
+
+def db_path():
+    return Path(os.environ.get("HEARTRATE_DB", Path.home() / ".local/share/heartrate/heartrate.db"))
+
+
+def state_path():
+    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return Path(runtime) / "heartrate" / "state.json"
+
+
+def load_config():
+    try:
+        with open(config_path(), "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+class Bucket:
+    def __init__(self, ts, label):
+        self.ts, self.label = ts, label
+        self.min = self.max = None
+        self.total = self.samples = 0
+
+    def add(self, bpm):
+        self.min = bpm if self.min is None else min(self.min, bpm)
+        self.max = bpm if self.max is None else max(self.max, bpm)
+        self.total += bpm
+        self.samples += 1
+
+
+class Store:
+    def __init__(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(path)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.executescript(SCHEMA)
+
+    def write(self, b):
+        date = time.strftime("%Y-%m-%d", time.localtime(b.ts))
+        with self.db:
+            # A re-flush of the same window (e.g. after a reconnect) merges into the existing row
+            self.db.execute(
+                """
+                INSERT INTO buckets (ts, date, min, avg, max, samples, source) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ts) DO UPDATE SET
+                  min = min(min, excluded.min),
+                  max = max(max, excluded.max),
+                  avg = (avg * samples + excluded.avg * excluded.samples) / (samples + excluded.samples),
+                  samples = samples + excluded.samples,
+                  date = excluded.date,
+                  source = excluded.source
+                """,
+                (b.ts, date, b.min, b.total / b.samples, b.max, b.samples, b.label),
+            )
+
+
+class Daemon:
+    def __init__(self, config):
+        self.source_name = config.get("source", "ble")
+        module = importlib.import_module(f"sources.{self.source_name}")
+        self.source = module.Source(config.get(self.source_name, {}), self.on_reading, self.on_status)
+        self.store = Store(db_path())
+        self.state_file = state_path()
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.status, self.device, self.reason, self.bpm = "disconnected", "", "starting", None
+        self.bucket = None
+        self.last_reading = 0
+        self.last_write = 0
+
+    def on_reading(self, bpm):
+        now = time.time()
+        self.last_reading = time.monotonic()
+        if self.status != "live":
+            self.status, self.reason = "live", ""
+        self.bpm = bpm
+        ts = int(now) // BUCKET * BUCKET
+        if self.bucket and self.bucket.ts != ts:
+            self.flush()
+        if self.bucket is None:
+            self.bucket = Bucket(ts, f"{self.source_name}:{self.device}")
+        self.bucket.add(bpm)
+        self.write_state()
+
+    def on_status(self, status, device, reason):
+        self.status, self.device, self.reason = status, device, reason
+        if status == "live":
+            self.last_reading = time.monotonic()
+        else:
+            self.bpm = None
+        if status == "disconnected":
+            self.flush()
+        self.write_state()
+
+    def flush(self):
+        if self.bucket is not None:
+            self.store.write(self.bucket)
+            self.bucket = None
+
+    def write_state(self):
+        status, reason = self.status, self.reason
+        if status == "live" and self.bpm is None:
+            # Live with nothing to show yet; the watchdog still tracks it as live
+            status, reason = "waiting", "waiting for first reading"
+        state = {
+            "status": status,
+            "bpm": self.bpm if status == "live" else None,
+            "device": self.device,
+            "source": self.source_name,
+            "reason": reason,
+            "updated": time.time(),
+        }
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(self.state_file)
+        self.last_write = time.monotonic()
+
+    def tick(self):
+        # An exception would make GLib drop this timer, silently ending flushes,
+        # heartbeats and the watchdog while the process lives on
+        try:
+            self.housekeeping()
+        except Exception:
+            traceback.print_exc()
+        return True
+
+    def housekeeping(self):
+        if self.bucket and time.time() >= self.bucket.ts + BUCKET:
+            self.flush()
+        if self.status == "live" and time.monotonic() - self.last_reading > STALE_AFTER:
+            self.on_status("disconnected", self.device, "no reading for a while")
+            self.source.stop()
+            self.source.start()
+        if time.monotonic() - self.last_write >= HEARTBEAT:
+            self.write_state()
+
+    def shutdown(self, loop):
+        try:
+            self.flush()
+        finally:
+            try:
+                self.source.stop()
+            finally:
+                self.state_file.unlink(missing_ok=True)
+                loop.quit()
+        return False
+
+    def run(self):
+        from gi.repository import GLib, GLibUnix
+
+        loop = GLib.MainLoop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, self.shutdown, loop)
+        self.write_state()
+        self.source.start()
+        GLib.timeout_add_seconds(1, self.tick)
+        loop.run()
+
+
+def caption(value):
+    return f"<span color='#9a978f'>hr</span> <span font_family='JetBrainsMono Nerd Font'>{value}</span>"
+
+
+def waybar_line(state):
+    if state is None or time.time() - state.get("updated", 0) > FOLLOW_STALE:
+        return {"text": caption("–"), "class": "disconnected", "tooltip": "heartrate daemon not running"}
+    status, device = state.get("status"), state.get("device") or ""
+    if status == "live" and state.get("bpm") is None:
+        status = "waiting"
+        state = {**state, "reason": state.get("reason") or "waiting for first reading"}
+    if status == "live":
+        return {"text": caption(state["bpm"]), "class": "live", "tooltip": f"{device}\n{state['bpm']} bpm"}
+    tooltip = "\n".join(part for part in (device, state.get("reason")) if part)
+    return {"text": caption("…" if status == "waiting" else "–"), "class": status, "tooltip": tooltip}
+
+
+def follow():
+    path = state_path()
+    mtime, state, last = None, None, None
+    while True:
+        try:
+            current = path.stat().st_mtime
+            if current != mtime:
+                state, mtime = json.loads(path.read_text()), current
+        except (FileNotFoundError, json.JSONDecodeError):
+            state, mtime = None, None
+        line = json.dumps(waybar_line(state))
+        if line != last:
+            print(line, flush=True)
+            last = line
+        time.sleep(1)
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["daemon"]:
+        Daemon(load_config()).run()
+    elif args == ["waybar", "--follow"]:
+        try:
+            follow()
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
+    elif not args:
+        print(USAGE, end="")
+    else:
+        print(USAGE, end="", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
