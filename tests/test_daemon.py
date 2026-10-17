@@ -264,5 +264,27 @@ class LiveWithoutReadingTest(DaemonTestCase):
         self.assertEqual(self.state()["status"], "waiting")
 
 
+class ShutdownErrorTest(DaemonTestCase):
+    def test_shutdown_quits_and_cleans_up_when_flush_fails(self):
+        self.go_live()
+        self.source.on_reading(70)
+        loop = FakeLoop()
+        with mock.patch.object(self.daemon.store, "write", side_effect=sqlite3.OperationalError("locked")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.daemon.shutdown(loop)
+        self.assertTrue(loop.quit_called)
+        self.assertEqual(self.source.calls, ["stop"])
+        self.assertFalse(self.env.state_file.exists())
+
+    def test_shutdown_quits_when_source_stop_fails(self):
+        self.source.stop = mock.Mock(side_effect=RuntimeError("boom"))
+        self.daemon.write_state()
+        loop = FakeLoop()
+        with self.assertRaises(RuntimeError):
+            self.daemon.shutdown(loop)
+        self.assertTrue(loop.quit_called)
+        self.assertFalse(self.env.state_file.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

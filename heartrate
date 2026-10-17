@@ -180,10 +180,14 @@ class Daemon:
             self.write_state()
 
     def shutdown(self, loop):
-        self.flush()
-        self.source.stop()
-        self.state_file.unlink(missing_ok=True)
-        loop.quit()
+        try:
+            self.flush()
+        finally:
+            try:
+                self.source.stop()
+            finally:
+                self.state_file.unlink(missing_ok=True)
+                loop.quit()
         return False
 
     def run(self):
