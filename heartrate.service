@@ -1,0 +1,10 @@
+[Unit]
+Description=Heart rate history daemon
+After=bluetooth.target
+
+[Service]
+ExecStart=%h/code/HeartRate/heartrate daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
