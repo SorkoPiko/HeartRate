@@ -86,17 +86,21 @@ class Store:
         self.db.executescript(SCHEMA)
 
     def write(self, b):
-        lo, hi, total, samples = b.min, b.max, b.total, b.samples
-        row = self.db.execute("SELECT min, avg, max, samples FROM buckets WHERE ts = ?", (b.ts,)).fetchone()
-        if row:
-            lo, hi = min(lo, row[0]), max(hi, row[2])
-            total += row[1] * row[3]
-            samples += row[3]
         date = time.strftime("%Y-%m-%d", time.localtime(b.ts))
         with self.db:
+            # A re-flush of the same window (e.g. after a reconnect) merges into the existing row
             self.db.execute(
-                "INSERT OR REPLACE INTO buckets (ts, date, min, avg, max, samples, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (b.ts, date, lo, total / samples, hi, samples, b.label),
+                """
+                INSERT INTO buckets (ts, date, min, avg, max, samples, source) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ts) DO UPDATE SET
+                  min = min(min, excluded.min),
+                  max = max(max, excluded.max),
+                  avg = (avg * samples + excluded.avg * excluded.samples) / (samples + excluded.samples),
+                  samples = samples + excluded.samples,
+                  date = excluded.date,
+                  source = excluded.source
+                """,
+                (b.ts, date, b.min, b.total / b.samples, b.max, b.samples, b.label),
             )
 
 
