@@ -89,14 +89,14 @@ class Source:
     def objects(self):
         return self.manager.GetManagedObjects()
 
-    def adapter(self):
-        for path, ifaces in self.objects().items():
+    def adapter(self, objects):
+        for path, ifaces in objects.items():
             if ADAPTER in ifaces:
                 return path
         return None
 
-    def find_device(self):
-        for path, ifaces in self.objects().items():
+    def find_device(self, objects):
+        for path, ifaces in objects.items():
             dev = ifaces.get(DEVICE)
             if not dev or HR_SERVICE not in [str(u).lower() for u in dev.get("UUIDs", [])]:
                 continue
@@ -104,8 +104,8 @@ class Source:
                 return path, dev
         return None, None
 
-    def find_char(self):
-        for path, ifaces in self.objects().items():
+    def find_char(self, objects):
+        for path, ifaces in objects.items():
             ch = ifaces.get(CHAR)
             if ch and path.startswith(self.device_path) and str(ch["UUID"]).lower() == HR_MEASUREMENT:
                 return path
@@ -131,15 +131,16 @@ class Source:
             self.offline("no reading for a while")
         if self.char_path is None and not self.connecting:
             try:
-                self.try_connect()
+                # One GetManagedObjects per tick, shared by every lookup below
+                self.try_connect(self.objects())
             except dbus.DBusException as err:
                 # bluetoothd is down or restarting; keep ticking until it's back
                 self.offline(f"bluetooth unavailable: {err.get_dbus_message()}")
 
-    def try_connect(self):
-        path, dev = self.find_device()
+    def try_connect(self, objects):
+        path, dev = self.find_device(objects)
         if path is None:
-            self.scan()
+            self.scan(objects)
             return
         self.device_path = path
         self.name = str(dev.get("Alias") or dev.get("Name") or dev.get("Address"))
@@ -149,11 +150,11 @@ class Source:
                 reply_handler=self.on_connected, error_handler=self.on_connect_error, timeout=20
             )
             return
-        self.stop_scan()
-        self.subscribe()
+        self.stop_scan(objects)
+        self.subscribe(objects)
 
-    def scan(self):
-        adapter = self.adapter()
+    def scan(self, objects):
+        adapter = self.adapter(objects)
         if adapter is None:
             self.offline("no bluetooth adapter")
             return
@@ -168,11 +169,11 @@ class Source:
         except dbus.DBusException:
             pass
 
-    def stop_scan(self):
+    def stop_scan(self, objects=None):
         if not self.scanning:
             return
         self.scanning = False
-        adapter = self.adapter()
+        adapter = self.adapter(self.objects() if objects is None else objects)
         if adapter is None:
             return
         try:
@@ -193,10 +194,10 @@ class Source:
             return
         self.offline(f"connect failed: {err.get_dbus_message()}")
 
-    def subscribe(self):
+    def subscribe(self, objects=None):
         if self.device_path is None:
             return False
-        self.char_path = self.find_char()
+        self.char_path = self.find_char(self.objects() if objects is None else objects)
         if self.char_path is None:
             return False  # tick retries once services resolve
         try:
