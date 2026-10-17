@@ -52,6 +52,7 @@ class Source:
         self.scanning = False
         self.matches = []
         self.timer = None
+        self.session = 0  # bumped by stop(), so callbacks from an earlier start() are ignored
 
     def start(self):
         self.matches = [
@@ -66,6 +67,7 @@ class Source:
         self.timer = GLib.timeout_add_seconds(RETRY_EVERY, self.tick)
 
     def stop(self):
+        self.session += 1
         if self.timer is not None:
             GLib.source_remove(self.timer)
             self.timer = None
@@ -157,8 +159,11 @@ class Source:
         self.name = str(dev.get("Alias") or dev.get("Name") or dev.get("Address"))
         if not dev.get("Connected"):
             self.connecting = True
+            session = self.session
             dbus.Interface(self.bus.get_object(BLUEZ, path), DEVICE).Connect(
-                reply_handler=self.on_connected, error_handler=self.on_connect_error, timeout=20
+                reply_handler=lambda: self.on_connected(session),
+                error_handler=lambda err: self.on_connect_error(err, session),
+                timeout=20,
             )
             return
         self.stop_scan(objects)
@@ -192,13 +197,22 @@ class Source:
         except dbus.DBusException:
             pass
 
-    def on_connected(self):
+    def on_connected(self, session):
+        if session != self.session:
+            return
         self.connecting = False
         self.stop_scan()
         # GATT services resolve shortly after Connect returns
-        GLib.timeout_add(1500, self.subscribe)
+        GLib.timeout_add(1500, self.subscribe_later, session)
 
-    def on_connect_error(self, err):
+    def subscribe_later(self, session):
+        if session == self.session:
+            self.subscribe()
+        return False
+
+    def on_connect_error(self, err, session):
+        if session != self.session:
+            return
         self.connecting = False
         # Another client is already connecting; the next tick picks up the connection
         if "InProgress" in err.get_dbus_name():

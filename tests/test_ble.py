@@ -162,5 +162,50 @@ class FindDeviceTest(BleTestCase):
         self.assertEqual(self.find(objects), WATCH)
 
 
+class RestartTest(BleTestCase):
+    def setUp(self):
+        super().setUp()
+        self.bluez.objects[WATCH] = device("COROS PACE 3", connected=False)
+        self.bluez.objects.update(hr_char(WATCH))
+        self.source = self.make_source()
+        self.source.start()
+
+    def restart(self):
+        self.source.stop()
+        self.source.start()
+
+    def test_stale_connect_reply_is_ignored(self):
+        old_reply, _ = self.bluez.connects[0]
+        self.restart()
+        self.assertTrue(self.source.connecting)  # new session's Connect is in flight
+        old_reply()
+        self.assertTrue(self.source.connecting)
+        self.assertEqual(self.timeouts, [])
+
+    def test_stale_connect_error_is_ignored(self):
+        _, old_error = self.bluez.connects[0]
+        self.restart()
+        before = list(self.statuses)
+        old_error(dbus.DBusException("failed", name="org.bluez.Error.Failed"))
+        self.assertEqual(self.statuses, before)
+        self.assertTrue(self.source.connecting)
+
+    def test_stale_pending_subscribe_is_ignored(self):
+        reply, _ = self.bluez.connects[0]
+        reply()
+        [(fn, args)] = self.timeouts
+        self.restart()
+        self.assertFalse(fn(*args))
+        self.assertEqual(self.bluez.count("StartNotify"), 0)
+
+    def test_current_session_subscribes(self):
+        reply, _ = self.bluez.connects[0]
+        reply()
+        [(fn, args)] = self.timeouts
+        fn(*args)
+        self.assertEqual(self.bluez.count("StartNotify"), 1)
+        self.assertEqual(self.statuses[-1][0], "waiting")
+
+
 if __name__ == "__main__":
     unittest.main()
