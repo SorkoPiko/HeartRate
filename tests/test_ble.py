@@ -207,5 +207,38 @@ class RestartTest(BleTestCase):
         self.assertEqual(self.statuses[-1][0], "waiting")
 
 
+class ZeroReadingTest(BleTestCase):
+    def setUp(self):
+        super().setUp()
+        self.source = self.make_source()
+        self.source.name = "COROS PACE 3"
+        self.source.char_path = f"{WATCH}/service0010/char0011"
+
+    def notify(self, bpm):
+        self.source.on_props(ble.CHAR, {"Value": [0x00, bpm]}, [], path=self.source.char_path)
+
+    def test_zero_is_not_a_reading(self):
+        self.notify(0)
+        self.notify(0)
+        self.assertEqual(self.readings, [])
+        self.assertNotIn("live", [s[0] for s in self.statuses])
+        self.assertEqual(self.statuses[-1], ("waiting", "COROS PACE 3", "waiting for first reading"))
+
+    def test_first_real_value_goes_live(self):
+        self.notify(0)
+        self.notify(72)
+        self.assertEqual(self.readings, [72])
+        self.assertEqual(self.statuses[-1][0], "live")
+
+    def test_zero_while_live_drops_back_to_waiting(self):
+        self.notify(72)
+        self.notify(0)
+        self.assertEqual(self.readings, [72])
+        self.assertEqual(self.statuses[-1][0], "waiting")
+        self.notify(75)
+        self.assertEqual(self.readings, [72, 75])
+        self.assertEqual(self.statuses[-1][0], "live")
+
+
 if __name__ == "__main__":
     unittest.main()

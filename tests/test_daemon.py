@@ -286,5 +286,24 @@ class ShutdownErrorTest(DaemonTestCase):
         self.assertFalse(self.env.state_file.exists())
 
 
+class ZeroReadingTest(DaemonTestCase):
+    def test_zero_bpm_is_ignored(self):
+        self.source.on_status("waiting", "Strap 1", "waiting for first reading")
+        self.source.on_reading(0)
+        self.assertIsNone(self.daemon.bucket)
+        state = self.state()
+        self.assertEqual(state["status"], "waiting")
+        self.assertIsNone(state["bpm"])
+        self.daemon.flush()
+        self.assertEqual(self.rows(), [])
+
+    def test_zero_while_live_keeps_last_real_value_out_of_buckets(self):
+        self.go_live()
+        self.source.on_reading(72)
+        self.source.on_reading(0)
+        self.assertEqual((self.daemon.bucket.min, self.daemon.bucket.samples), (72, 1))
+        self.assertEqual(self.state()["bpm"], 72)
+
+
 if __name__ == "__main__":
     unittest.main()
